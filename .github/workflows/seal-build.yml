@@ -1,0 +1,120 @@
+name: seal-build
+
+on:
+  workflow_dispatch:
+    inputs:
+      test-filter:
+        description: "Go package pattern(s) to test instead of ./..."
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+env:
+  MODULE_PATH: golang.org/x/tools
+  MODULE_VERSION: v0.0.0-20190911174233-4f2ddba30aff
+
+jobs:
+  module-zip:
+    name: module zip
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: false
+      - name: Build x/mod zip helper
+        run: |
+          set -eux
+          HELPER=$(mktemp -d)
+          cp .github/create_mod.go "$HELPER/main.go"
+          cd "$HELPER"
+          go mod init example.com/createmod
+          go get golang.org/x/mod@v0.24.0
+          go build -o "$RUNNER_TEMP/create_mod" .
+      - name: Pack module zip
+        run: |
+          set -eux
+          mkdir -p "$RUNNER_TEMP/zipsrc" "$RUNNER_TEMP/out"
+          tar -c --exclude=.git --exclude=.github -C "$GITHUB_WORKSPACE" . | tar -x -C "$RUNNER_TEMP/zipsrc"
+          test ! -e "$RUNNER_TEMP/zipsrc/.github"
+          test -f "$RUNNER_TEMP/zipsrc/go.mod"
+          test -f "$RUNNER_TEMP/zipsrc/.gitignore"
+          test -f "$RUNNER_TEMP/zipsrc/.gitattributes"
+          "$RUNNER_TEMP/create_mod" "$MODULE_PATH" "$MODULE_VERSION" "$RUNNER_TEMP/zipsrc" "$RUNNER_TEMP/out/$MODULE_VERSION.zip"
+          unzip -Z1 "$RUNNER_TEMP/out/$MODULE_VERSION.zip" | wc -l
+          test "$(unzip -Z1 "$RUNNER_TEMP/out/$MODULE_VERSION.zip" | wc -l)" -eq 1220
+          sha256sum "$RUNNER_TEMP/out/$MODULE_VERSION.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: module-zip
+          path: ${{ runner.temp }}/out/${{ env.MODULE_VERSION }}.zip
+          if-no-files-found: error
+
+  test:
+    name: test (${{ matrix.os }}, go ${{ matrix.go }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            go: "1.12.17"
+          # Go 1.12's cmd/go does not retry Windows sharing violations when
+          # concurrent go list processes rewrite the same go.mod, which flakes
+          # go/packages' Modules tests ("error writing go.mod: rename ...");
+          # Go 1.13 added those retries (cmd/go/internal/robustio).
+          - os: windows-latest
+            go: "1.13.15"
+    defaults:
+      run:
+        shell: bash
+    env:
+      GO111MODULE: "on"
+      GOPROXY: https://proxy.golang.org
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+          cache: false
+      # Go 1.12/1.13 ship runtime/cgo prebuilt against the msvcrt MinGW runtime
+      # (it references __iob_func); the runner's default C:\mingw64 gcc is
+      # UCRT-based and cannot link it. Use MSYS2's msvcrt MINGW64 gcc instead.
+      - uses: msys2/setup-msys2@v2
+        if: runner.os == 'Windows'
+        id: msys2
+        with:
+          msystem: MINGW64
+          update: false
+          install: mingw-w64-x86_64-gcc
+      - name: Configure Windows toolchain and temp dir
+        if: runner.os == 'Windows'
+        run: |
+          set -eux
+          # Prepend the msvcrt MinGW gcc to PATH for the following steps.
+          echo "${{ steps.msys2.outputs.msys2-location }}\\mingw64\\bin" >> "$GITHUB_PATH"
+          # The runner's default TEMP is the 8.3 short path C:\Users\RUNNER~1\...,
+          # which the go command reports in long form, so go/packages ad-hoc
+          # file= queries (TestAdHocOverlays) match nothing. Use a long path.
+          echo "TEMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          echo "TMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+      - name: Build
+        run: |
+          set -eux
+          go version
+          go env
+          gcc --version
+          go build ./...
+      - name: Test
+        run: |
+          set -euxo pipefail
+          # -p 1: cmd/godoc TestWebIndex waits at most 2m for the search index
+          # and times out when other packages' tests compete for the CPU.
+          go test -v -p 1 ${{ inputs.test-filter || './...' }} 2>&1 | tee "$RUNNER_TEMP/go-test.log"
+          # go test prints no overall total; summarize the -v result lines.
+          awk '/^[[:space:]]*--- PASS/{p++} /^[[:space:]]*--- FAIL/{f++} /^[[:space:]]*--- SKIP/{s++} /^ok[[:space:]]/{ok++} /^FAIL[[:space:]]/{fp++} /\[no test files\]/{nt++} END{printf "go test summary: %d tests passed, %d tests failed, %d tests skipped; %d packages ok, %d packages failed, %d packages without test files\n", p, f, s, ok, fp, nt}' "$RUNNER_TEMP/go-test.log"

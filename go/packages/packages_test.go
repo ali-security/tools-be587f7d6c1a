@@ -1090,6 +1090,9 @@ const A = 1
 	if err != nil {
 		t.Error(err)
 	}
+	if len(initial) == 0 && runtime.GOOS == "windows" {
+		t.Skip("Issue #31344: the ad-hoc command-line-arguments package isn't created on windows")
+	}
 	// Check value of a.A.
 	a := initial[0]
 	if a.Errors != nil {
@@ -1991,6 +1994,10 @@ func testErrorMissingFile(t *testing.T, exporter packagestest.Exporter) {
 	if len(pkgs) == 0 && runtime.GOOS == "windows" {
 		t.Skip("Issue #31344: the ad-hoc command-line-arguments package isn't created on windows")
 	}
+	// With Go 1.13 on windows the same issue yields a per-file package instead.
+	if runtime.GOOS == "windows" && (len(pkgs) != 1 || pkgs[0].PkgPath != "command-line-arguments") {
+		t.Skipf("Issue #31344: the ad-hoc command-line-arguments package isn't created on windows (got %v)", pkgs)
+	}
 	if len(pkgs) != 1 || pkgs[0].PkgPath != "command-line-arguments" {
 		t.Fatalf("packages.Load: want [command-line-arguments], got %v", pkgs)
 	}
@@ -2022,6 +2029,9 @@ func testReturnErrorWhenUsingNonGoFiles(t *testing.T, exporter packagestest.Expo
 			t.Fatalf("want error message: %s, got: %s", want, err.Error())
 		}
 		return
+	}
+	if runtime.GOOS == "windows" && (len(pkgs) != 1 || pkgs[0].PkgPath != "command-line-arguments") {
+		t.Skipf("Issue #31344: the ad-hoc command-line-arguments package isn't created on windows (got %v)", pkgs)
 	}
 	if len(pkgs) != 1 || pkgs[0].PkgPath != "command-line-arguments" {
 		t.Fatalf("packages.Load: want [command-line-arguments], got %v", pkgs)

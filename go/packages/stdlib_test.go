@@ -67,6 +67,13 @@ func TestCgoOption(t *testing.T) {
 
 	testenv.NeedsGoPackages(t)
 
+	// On Windows the net and os/user packages don't use cgo, so the
+	// cgo-only objects checked below don't exist (go/loader's
+	// TestCgoOption skips Windows for the same reason).
+	if runtime.GOOS == "windows" {
+		t.Skipf("no cgo in net and os/user on %s", runtime.GOOS)
+	}
+
 	// TODO(adonovan): see if we can get away without these old
 	// go/loader hacks now that we use the go list command.
 	//
