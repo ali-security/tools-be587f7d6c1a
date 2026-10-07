@@ -9,14 +9,18 @@ import (
 	"context"
 	"io/ioutil"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/tools/go/packages/packagestest"
+	"golang.org/x/tools/internal/lsp/cmd"
 	"golang.org/x/tools/internal/lsp/tests"
 	"golang.org/x/tools/internal/testenv"
+	"golang.org/x/tools/internal/tool"
 )
 
 func TestMain(m *testing.M) {
@@ -44,6 +48,49 @@ func testCommandLine(t *testing.T, exporter packagestest.Exporter) {
 		ctx:      tests.Context(t),
 	}
 	tests.Run(t, r, data)
+}
+
+// TestServeImplicitAllInterfaces checks that the server refuses to
+// implicitly listen on all network interfaces: the -port flag (which bound
+// ":port") is gone, and -listen rejects addresses with an empty host.
+func TestServeImplicitAllInterfaces(t *testing.T) {
+	const argsEnv = "GOPLS_TEST_SERVE_ARGS"
+	if args := os.Getenv(argsEnv); args != "" {
+		// Child process: run gopls with the given arguments. tool.Main exits
+		// the process if the command fails; on success it would keep serving.
+		app := cmd.New("gopls-test", "", nil)
+		tool.Main(context.Background(), app, strings.Fields(args))
+		os.Exit(0)
+	}
+	for _, test := range []struct {
+		args string
+		want string
+	}{
+		// -port=N used to listen on ":N"; a nonzero value is needed to reach
+		// that code path, but the flag itself must now be rejected.
+		{"serve -port=12345", "flag provided but not defined: -port"},
+		{"-port=12345", "flag provided but not defined: -port"},
+		{"serve -listen=:0", "-listen=:0 implicitly binds all network interfaces"},
+		{"-listen=:0", "-listen=:0 implicitly binds all network interfaces"},
+	} {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		c := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestServeImplicitAllInterfaces$")
+		c.Env = append(os.Environ(), argsEnv+"="+test.args)
+		out, err := c.CombinedOutput()
+		timedOut := ctx.Err() != nil
+		cancel()
+		if timedOut {
+			t.Errorf("gopls %s: still serving after timeout, want it to refuse to listen on all network interfaces\n%s", test.args, out)
+			continue
+		}
+		if err == nil {
+			t.Errorf("gopls %s: succeeded, want failure\n%s", test.args, out)
+			continue
+		}
+		if !strings.Contains(string(out), test.want) {
+			t.Errorf("gopls %s: output does not contain %q:\n%s", test.args, test.want, out)
+		}
+	}
 }
 
 func (r *runner) Completion(t *testing.T, data tests.Completions, snippets tests.CompletionSnippets, items tests.CompletionItems) {
